@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OneMorePlat Library Scan
 // @namespace    https://github.com/SrGalletaEXT/onemoreplat-library-scan
-// @version      4.1.0
+// @version      4.2.0
 // @description  Reports your own Steam library (delisted, family-shared, and never-launched free games GetOwnedGames misses) to OneMorePlat -- reads only your own logged-in browser session, no third-party data.
 // @author       SrGalletaEXT
 // @match        https://store.steampowered.com/*
@@ -226,10 +226,14 @@
         return;
       }
 
+      // Comfortably above the server's own worst case (~10 appIds x ~2.5s each, see
+      // SyncService.maxNewAppIdsPerLibraryScan) and still under nginx's own 60s upstream
+      // timeout -- a real production run without this margin got mistaken for "stuck" while
+      // the server was still genuinely working.
       pendingTimeoutId = setTimeout(() => {
         resetButton();
         label.textContent = 'OneMorePlat: no ha llegado respuesta a tiempo -- inténtalo de nuevo.';
-      }, 20000);
+      }, 45000);
     });
 
     GM_addValueChangeListener(RESULT_KEY, (_key, _oldValue, newValue) => {
