@@ -8,8 +8,8 @@ Steam's Web API doesn't always reflect everything an account has real access to.
 
 ## What it actually does
 
-- On `store.steampowered.com`: reads `dynamicstore/userdata` (same-origin, your own session) and sends the appId list to OneMorePlat. This is throttled server-side (a few hours between real runs), so most page loads do nothing.
-- On your own `steamcommunity.com` profile page: shows a small panel with the result of the last scan. It checks that the profile being viewed is **your own** before showing anything -- it never appears on someone else's profile, and viewing someone else's profile never sends their data anywhere.
+- On `store.steampowered.com`: reads `dynamicstore/userdata` and sends the appId list to OneMorePlat automatically, in the background. This is throttled server-side (a few hours between real runs), so most page loads do nothing.
+- On your own `steamcommunity.com` profile page: shows a small panel with the result of the last scan, plus a **"Sincronizar ahora"** button to run it again right there on demand. It checks that the profile being viewed is **your own** before showing anything -- it never appears on someone else's profile, and viewing someone else's profile never sends their data anywhere.
 
 ## Install
 
