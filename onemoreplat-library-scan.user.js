@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OneMorePlat Library Scan
 // @namespace    https://github.com/SrGalletaEXT/onemoreplat-library-scan
-// @version      4.0.0
+// @version      4.1.0
 // @description  Reports your own Steam library (delisted, family-shared, and never-launched free games GetOwnedGames misses) to OneMorePlat -- reads only your own logged-in browser session, no third-party data.
 // @author       SrGalletaEXT
 // @match        https://store.steampowered.com/*
@@ -35,12 +35,15 @@
  *  - store.steampowered.com: reads dynamicstore/userdata (same-origin, no cross-origin
  *    trickery needed) and sends the result to OneMorePlat. Runs automatically on any store
  *    page load (silent; the server's own per-account cooldown means most loads are a no-op),
- *    and ALSO whenever a "Buscar juegos" click below opens this exact URL directly.
+ *    and ALSO whenever a "Buscar juegos" click below opens the store this way.
  *  - steamcommunity.com profile pages: shows a small status panel with the last result, plus a
- *    "Buscar juegos" button. Clicking it opens dynamicstore/userdata itself in a new tab --
- *    "the page with every id" -- which runs the same read-and-send logic above in a proper
- *    same-origin context (no CORS/cookie workarounds needed), closes itself once done, and the
- *    panel here updates live via GM_addValueChangeListener the moment that happens. Only ever
+ *    "Buscar juegos" button. Clicking it opens the store front page in a new tab (marked with
+ *    a URL flag so that tab knows to close itself once done) -- a real HTML page, deliberately
+ *    NOT dynamicstore/userdata directly: that endpoint returns raw JSON, which some browsers
+ *    render as a built-in JSON viewer instead of a normal document a userscript can reliably
+ *    run on. The new tab's own script instance runs the same read-and-send logic above, and
+ *    the panel here updates live via GM_addValueChangeListener the moment that happens (with a
+ *    pop-up-blocked check and a timeout, so the button never gets stuck silently). Only ever
  *    shown on your OWN profile (compares the logged-in session's steamID against the profile
  *    being viewed) -- it never appears on anyone else's profile, and viewing someone else's
  *    profile never sends their data anywhere; the library read is always tied to your own
@@ -56,6 +59,11 @@
   const API_BASE = 'https://onemoreplat.games/api';
   const RESULT_KEY = 'onemoreplatLastScanResult';
   const DYNAMICSTORE_URL = 'https://store.steampowered.com/dynamicstore/userdata/';
+  // A real HTML page (not dynamicstore/userdata's raw JSON) for the "Buscar juegos" button to
+  // open -- see the header comment for why. The query param is just a signal that tab reads
+  // back below to know it should close itself once the scan finishes.
+  const AUTO_CLOSE_PARAM = 'onemoreplat_scan';
+  const STORE_ENTRY_URL = `https://store.steampowered.com/?${AUTO_CLOSE_PARAM}=1`;
 
   async function fetchOwnedAppIds() {
     const response = await fetch(DYNAMICSTORE_URL, { credentials: 'include' });
@@ -116,11 +124,12 @@
     } catch (error) {
       console.warn('[OneMorePlat Library Scan]', error);
     } finally {
-      // This exact URL is only ever reached organically never -- it's what the profile
-      // page's "Buscar juegos" button opens in a new tab specifically to run this, so once
-      // done there's nothing left for that tab to show. window.close() only works on a tab
-      // opened by script (window.open), which this always is in that case.
-      if (location.href.indexOf('/dynamicstore/userdata') !== -1) {
+      // Only present when this tab was opened by the profile page's "Buscar juegos" button
+      // (see STORE_ENTRY_URL) -- organic browsing never carries this param, so this never
+      // closes a tab the user opened themselves. window.close() only works on a tab opened by
+      // script (window.open), which this always is in that case.
+      const params = new URLSearchParams(location.search);
+      if (params.has(AUTO_CLOSE_PARAM)) {
         window.close();
       }
     }
@@ -190,19 +199,41 @@
       }
     }
 
+    let pendingTimeoutId = null;
+
+    function resetButton() {
+      if (pendingTimeoutId) {
+        clearTimeout(pendingTimeoutId);
+        pendingTimeoutId = null;
+      }
+      button.disabled = false;
+      button.textContent = 'Buscar juegos';
+    }
+
     button.addEventListener('click', () => {
       button.disabled = true;
       button.textContent = 'Buscando…';
       label.textContent = 'OneMorePlat: abriendo Steam para leer tu biblioteca…';
-      // Opens dynamicstore/userdata itself -- the actual "page with every id" -- in a new tab.
-      // That tab's own script instance (matched by @match on store.steampowered.com/*) does
-      // the real work and closes itself when finished; this tab just waits for the result.
-      window.open(DYNAMICSTORE_URL, '_blank');
+
+      // A real HTML page (STORE_ENTRY_URL), not dynamicstore/userdata's raw JSON directly --
+      // see the header comment. That tab's own script instance runs the real work and closes
+      // itself when finished; this tab just waits for the result.
+      const openedWindow = window.open(STORE_ENTRY_URL, '_blank');
+      if (!openedWindow) {
+        resetButton();
+        label.textContent =
+          'OneMorePlat: el navegador ha bloqueado la ventana nueva -- permite pop-ups para steamcommunity.com e inténtalo otra vez.';
+        return;
+      }
+
+      pendingTimeoutId = setTimeout(() => {
+        resetButton();
+        label.textContent = 'OneMorePlat: no ha llegado respuesta a tiempo -- inténtalo de nuevo.';
+      }, 20000);
     });
 
     GM_addValueChangeListener(RESULT_KEY, (_key, _oldValue, newValue) => {
-      button.disabled = false;
-      button.textContent = 'Buscar juegos';
+      resetButton();
       try {
         label.textContent = `OneMorePlat: ${summarize(JSON.parse(newValue))}`;
       } catch (error) {
