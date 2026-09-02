@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OneMorePlat Library Scan
 // @namespace    https://github.com/SrGalletaEXT/onemoreplat-library-scan
-// @version      5.0.0
+// @version      6.0.0
 // @description  Reports your own Steam library (delisted, family-shared, and never-launched free games GetOwnedGames misses) to OneMorePlat -- reads only your own logged-in browser session, no third-party data.
 // @author       SrGalletaEXT
 // @match        https://store.steampowered.com/*
@@ -24,29 +24,23 @@
  * (dynamicstore/userdata) it reads to build your library/wishlist pages reflects raw
  * ownership, no filtering. This script reads that endpoint from YOUR OWN logged-in session --
  * nothing it does requires (or uses) any other account's data -- and reports the plain list of
- * owned appIds to OneMorePlat, which then checks each new one against Steam's own achievement
- * APIs before adding anything. The script's own job stops at reading and normalizing that
- * list; every actual verification (and all of the real work) happens server-side, in its own
- * time -- OneMorePlat just queues the list, it does not process it while this script waits.
+ * owned appIds to OneMorePlat. The script's own job stops right there: no classification, no
+ * verification, no waiting to see what OneMorePlat did with it -- that's all server-side, on
+ * its own schedule, and this script never asks it for the result back.
  *
  * Where it runs:
- *  - store.steampowered.com: reads dynamicstore/userdata (same-origin, no cross-origin
- *    trickery needed) and sends the list to OneMorePlat, which queues it for its own
- *    background worker -- the response here just confirms it was queued (or, if OneMorePlat
- *    scanned recently enough already, echoes that previous result back). Runs automatically
- *    on any store page load (silent; the server's own per-account cooldown means most loads
- *    are a no-op), and ALSO whenever a "Buscar juegos" click below opens the store this way.
- *  - steamcommunity.com profile pages: shows a small status panel with the last COMPLETED
- *    scan (fetched fresh on every page load -- there's no live progress to show, a scan can
- *    take anywhere from seconds to a while depending on how much is new), plus a "Buscar
- *    juegos" button. Clicking it opens the store front page in a new tab (a real HTML page,
- *    deliberately NOT dynamicstore/userdata directly: that endpoint returns raw JSON, which
- *    some browsers render as a built-in JSON viewer instead of a normal document a userscript
- *    can reliably run on) tagged with a URL flag so that tab closes itself once it's sent the
- *    list. The panel then checks back a few times over the next couple of minutes in case the
- *    scan finishes quickly; if it's still not done by then, it just says so -- checking this
- *    page again later will show it once it's ready, same as it would on any other page load.
- *    Only ever shown on your OWN profile (compares the logged-in session's steamID against the
+ *  - store.steampowered.com: reads dynamicstore/userdata (same-origin) and sends the list.
+ *    Runs automatically on any store page load (silent; the server's own per-account cooldown
+ *    means most loads are a no-op), and ALSO whenever a "Buscar juegos" click below opens the
+ *    store this way.
+ *  - steamcommunity.com profile pages: shows a small panel with a **"Buscar juegos"** button
+ *    and, underneath, when you last used it -- read from a plain cookie set on THIS page the
+ *    moment you click it, not from anything OneMorePlat's server says. Clicking the button
+ *    opens the store front page in a new tab (a real HTML page, deliberately NOT
+ *    dynamicstore/userdata directly: that endpoint returns raw JSON, which some browsers
+ *    render as a built-in JSON viewer instead of a normal document a userscript can reliably
+ *    run on) tagged with a URL flag so that tab closes itself once it's sent the list. Only
+ *    ever shown on your OWN profile (compares the logged-in session's steamID against the
  *    profile being viewed) -- it never appears on anyone else's profile, and viewing someone
  *    else's profile never sends their data anywhere; the library read is always tied to your
  *    own session, never to whichever profile happens to be open.
@@ -60,27 +54,25 @@
 
   const API_BASE = 'https://onemoreplat.games/api';
   const DYNAMICSTORE_URL = 'https://store.steampowered.com/dynamicstore/userdata/';
+  const LAST_SENT_COOKIE = 'onemoreplat_last_sent';
   // A real HTML page (not dynamicstore/userdata's raw JSON) for the "Buscar juegos" button to
   // open -- see the header comment for why. The query param is just a signal that tab reads
   // back below to know it should close itself once it's sent the list.
   const AUTO_CLOSE_PARAM = 'onemoreplat_scan';
   const STORE_ENTRY_URL = `https://store.steampowered.com/?${AUTO_CLOSE_PARAM}=1`;
 
-  function gmRequest(options) {
+  // GM_xmlhttpRequest, not fetch: this is a cross-origin POST (store.steampowered.com ->
+  // onemoreplat.games). A plain fetch would need CORS headers OneMorePlat's backend doesn't
+  // send for arbitrary origins and doesn't need to -- GM_xmlhttpRequest isn't subject to the
+  // page's CORS policy at all, it's the browser extension itself making the request.
+  function queueLibraryScan(steamId, appIds) {
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
-        ...options,
-        onload: (res) => {
-          if (res.status >= 200 && res.status < 300) {
-            try {
-              resolve(res.responseText ? JSON.parse(res.responseText) : null);
-            } catch (error) {
-              reject(error);
-            }
-          } else {
-            reject(new Error(`HTTP ${res.status}`));
-          }
-        },
+        method: 'POST',
+        url: `${API_BASE}/sync/library-scan`,
+        headers: { 'Content-Type': 'application/json' },
+        data: JSON.stringify({ steamId, appIds }),
+        onload: (res) => (res.status >= 200 && res.status < 300 ? resolve() : reject(new Error(`HTTP ${res.status}`))),
         onerror: () => reject(new Error('network error')),
         ontimeout: () => reject(new Error('request timed out'))
       });
@@ -96,31 +88,9 @@
     return Array.isArray(data.rgOwnedApps) ? data.rgOwnedApps : [];
   }
 
-  // GM_xmlhttpRequest, not fetch: this is a cross-origin request (store.steampowered.com /
-  // steamcommunity.com -> onemoreplat.games). A plain fetch would need CORS headers
-  // OneMorePlat's backend doesn't send for arbitrary origins and doesn't need to --
-  // GM_xmlhttpRequest isn't subject to the page's CORS policy at all, it's the browser
-  // extension itself making the request.
-  function queueLibraryScan(steamId, appIds) {
-    return gmRequest({
-      method: 'POST',
-      url: `${API_BASE}/sync/library-scan`,
-      headers: { 'Content-Type': 'application/json' },
-      data: JSON.stringify({ steamId, appIds })
-    });
-  }
-
-  function fetchLibraryScanStatus(steamId) {
-    return gmRequest({
-      method: 'GET',
-      url: `${API_BASE}/sync/library-scan/status?steamId=${encodeURIComponent(steamId)}`
-    });
-  }
-
   // The script's whole job: read the account's own appId list, normalize it (just "is this
-  // actually an array of appIds"), and hand it off. No classification, no filtering by type,
-  // no verification of any kind happens here -- and no waiting around for it to be processed
-  // either, that's all server-side, on its own schedule.
+  // actually an array of appIds"), and hand it off -- no classification, no filtering, no
+  // verification, and no waiting around for a result, that's all server-side from here.
   async function runOnStorePage() {
     if (typeof g_steamID === 'undefined' || !g_steamID) {
       return; // not logged in
@@ -154,16 +124,18 @@
     return null;
   }
 
-  function summarize(result) {
-    if (!result) {
-      return 'aún sin datos.';
-    }
-    const newGames = result.newGames || [];
-    if (newGames.length > 0) {
-      const names = newGames.map((g) => g.name).join(', ');
-      return `${newGames.length} juego(s) nuevo(s) encontrado(s) -- ${names}`;
-    }
-    return `Última comprobación sin novedades (${new Date(result.scannedAt).toLocaleString()})`;
+  // Plain cookie on steamcommunity.com -- deliberately local, not a read from OneMorePlat's
+  // own server: this only ever records "you clicked the button on THIS page", nothing about
+  // what actually happened to the data afterwards. 1 year is just "keep it around", not a
+  // meaningful expiry.
+  function readLastSentCookie() {
+    const match = document.cookie.match(new RegExp(`(?:^|; )${LAST_SENT_COOKIE}=([^;]+)`));
+    return match ? decodeURIComponent(match[1]) : null;
+  }
+
+  function writeLastSentCookie() {
+    const oneYear = 365 * 24 * 60 * 60;
+    document.cookie = `${LAST_SENT_COOKIE}=${encodeURIComponent(new Date().toISOString())}; max-age=${oneYear}; path=/; SameSite=Lax`;
   }
 
   function runOnProfilePage() {
@@ -186,74 +158,36 @@
       'display:flex;align-items:center;justify-content:space-between;gap:12px;';
 
     const label = document.createElement('span');
-    label.textContent = 'OneMorePlat: comprobando…';
     const button = document.createElement('button');
     button.textContent = 'Buscar juegos';
     button.style.cssText =
       'background:#2a475e;color:#c7d5e0;border:1px solid #66c0f4;border-radius:3px;' +
       'padding:5px 12px;font-size:12px;cursor:pointer;flex:0 0 auto;';
 
-    let lastKnownScannedAt = null;
-
-    async function refreshLabel() {
-      try {
-        const result = await fetchLibraryScanStatus(g_steamID);
-        lastKnownScannedAt = result ? result.scannedAt : lastKnownScannedAt;
-        label.textContent = `OneMorePlat: ${summarize(result)}`;
-        return result;
-      } catch (error) {
-        label.textContent = 'OneMorePlat: no se pudo comprobar el estado.';
-        return null;
-      }
-    }
-
-    // After requesting a scan, check back a few times over ~2 minutes in case it finishes
-    // quickly -- stops the moment scannedAt moves past whatever it was before the click. If it
-    // still hasn't by the last check, this just says so; the next normal page load will show
-    // the real result whenever it's actually ready, no different from checking back later.
-    async function pollForCompletion() {
-      const checkTimes = [10000, 20000, 30000, 45000, 60000, 90000, 120000];
-      const startedWithScannedAt = lastKnownScannedAt;
-
-      for (const delay of checkTimes) {
-        await new Promise((resolve) => setTimeout(resolve, delay));
-        const result = await refreshLabel();
-        if (result && result.scannedAt !== startedWithScannedAt) {
-          button.disabled = false;
-          button.textContent = 'Buscar juegos';
-          return;
-        }
-      }
-
-      button.disabled = false;
-      button.textContent = 'Buscar juegos';
-      label.textContent = 'OneMorePlat: escaneo en curso todavía -- vuelve a mirar esta página más tarde.';
+    function renderLabel() {
+      const lastSent = readLastSentCookie();
+      label.textContent = lastSent
+        ? `OneMorePlat: último envío ${new Date(lastSent).toLocaleString()}`
+        : 'OneMorePlat: todavía no se ha enviado nada desde aquí.';
     }
 
     button.addEventListener('click', () => {
-      button.disabled = true;
-      button.textContent = 'Buscando…';
-      label.textContent = 'OneMorePlat: abriendo Steam para leer tu biblioteca…';
-
       const openedWindow = window.open(STORE_ENTRY_URL, '_blank');
       if (!openedWindow) {
-        button.disabled = false;
-        button.textContent = 'Buscar juegos';
         label.textContent =
           'OneMorePlat: el navegador ha bloqueado la ventana nueva -- permite pop-ups para steamcommunity.com e inténtalo otra vez.';
         return;
       }
-
-      void pollForCompletion();
+      writeLastSentCookie();
+      renderLabel();
     });
 
+    renderLabel();
     panel.appendChild(label);
     panel.appendChild(button);
 
     const anchor = document.querySelector('.profile_header') || document.querySelector('.profile_page') || document.body;
     anchor.insertBefore(panel, anchor.firstChild);
-
-    void refreshLabel();
   }
 
   if (location.hostname === 'store.steampowered.com') {
