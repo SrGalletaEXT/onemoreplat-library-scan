@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OneMorePlat Library Scan
 // @namespace    https://github.com/SrGalletaEXT/onemoreplat-library-scan
-// @version      7.0.0
+// @version      8.0.0
 // @description  Reports your own Steam library (delisted, family-shared, and never-launched free games GetOwnedGames misses) to OneMorePlat -- reads only your own logged-in browser session, no third-party data.
 // @author       SrGalletaEXT
 // @match        https://store.steampowered.com/*
@@ -9,6 +9,7 @@
 // @match        https://steamcommunity.com/profiles/*/*
 // @grant        GM_xmlhttpRequest
 // @connect      store.steampowered.com
+// @connect      api.steampowered.com
 // @connect      onemoreplat.games
 // @run-at       document-idle
 // @updateURL    https://raw.githubusercontent.com/SrGalletaEXT/onemoreplat-library-scan/main/onemoreplat-library-scan.user.js
@@ -25,8 +26,20 @@
  * (dynamicstore/userdata) it reads to build your library/wishlist pages reflects raw
  * ownership, no filtering. This script reads that endpoint from YOUR OWN logged-in session --
  * nothing it does requires (or uses) any other account's data -- and reports the plain list of
- * owned appIds to OneMorePlat. The script's own job stops right there: no classification, no
- * verification happens in the browser -- that's all server-side, on its own schedule.
+ * owned appIds to OneMorePlat.
+ *
+ * Family-shared games are a SEPARATE gap this also closes (v8): a game someone else in your
+ * Steam Family Group shared with you never appears in rgOwnedApps or GetOwnedGames at all --
+ * you don't hold a license for it, you're just allowed to launch it. Confirmed for real: a
+ * OneMorePlat user's genuine, real achievement progress in a family-shared game was completely
+ * invisible to every sync path until fixed by hand. This script resolves your own Family Group
+ * (IFamilyGroupsService, using a short-lived access token Steam's own store front-end already
+ * hands your logged-in session -- the same kind of token the store page itself uses for its own
+ * features, not a login credential) and reports which shared appIds aren't apps you own
+ * outright. The script's own job stops right there in both cases: no classification, no
+ * verification happens in the browser -- OneMorePlat's backend independently checks
+ * GetPlayerAchievements for every family-shared appId before ever adding it, since being shared
+ * into the group is not proof you've actually played it.
  *
  * Where it runs:
  *  - store.steampowered.com: reads dynamicstore/userdata (same-origin) and sends the list.
@@ -45,6 +58,11 @@
  *    profile being viewed) -- it never appears on anyone else's profile, and viewing someone
  *    else's profile never sends their data anywhere; the library read is always tied to your
  *    own session, never to whichever profile happens to be open.
+ *  - Family Group sharing is checked from BOTH entry points above, right alongside the
+ *    rgOwnedApps read -- same silence/same button, no separate step for you to run. If it
+ *    fails for any reason (no Family Group, Steam changed the endpoint, anything) it's caught
+ *    and logged to the console, never blocking the rest of the report -- rgOwnedApps still
+ *    gets sent either way.
  *
  * No setup needed beyond installing this -- your Steam ID alone identifies your OneMorePlat
  * account, same as it already does for any of Steam's own APIs.
@@ -55,6 +73,9 @@
 
   const API_BASE = 'https://onemoreplat.games/api';
   const DYNAMICSTORE_URL = 'https://store.steampowered.com/dynamicstore/userdata/';
+  const ASYNC_CONFIG_URL = 'https://store.steampowered.com/pointssummary/ajaxgetasyncconfig';
+  const FAMILY_GROUP_URL = 'https://api.steampowered.com/IFamilyGroupsService/GetFamilyGroupForUser/v1/';
+  const SHARED_LIBRARY_URL = 'https://api.steampowered.com/IFamilyGroupsService/GetSharedLibraryApps/v1/';
   const LAST_SENT_COOKIE = 'onemoreplat_last_sent';
 
   function gmRequest(options) {
@@ -94,29 +115,138 @@
     return Array.isArray(data.rgOwnedApps) ? data.rgOwnedApps : [];
   }
 
+  // Always GM_xmlhttpRequest, not fetch, regardless of which page this runs from --
+  // api.steampowered.com is never same-origin with either store.steampowered.com or
+  // steamcommunity.com, unlike dynamicstore/userdata above (same-origin on the store page
+  // only). Cookies for store.steampowered.com still ride along automatically (needed for the
+  // token step, which reads the logged-in session the same way dynamicstore/userdata does).
+  //
+  // fetchFamilySharedAppIds is deliberately best-effort: ANY failure along this whole chain
+  // (token request, family group lookup, shared-library call, or an unexpected response
+  // shape) resolves to an empty list and logs a warning, instead of throwing -- rgOwnedApps
+  // reporting must never be blocked by this newer, less-proven feature.
+  async function fetchFamilySharedAppIds(mySteamId) {
+    try {
+      const token = await fetchWebApiToken();
+      if (!token) {
+        return [];
+      }
+
+      const familyGroupId = await resolveFamilyGroupId(token);
+      if (!familyGroupId) {
+        return []; // Not in a Family Group at all -- a normal, common case, not an error.
+      }
+
+      return await fetchSharedLibraryAppIds(token, familyGroupId, mySteamId);
+    } catch (error) {
+      console.warn('[OneMorePlat Library Scan] family-sharing check failed, skipping:', error);
+      return [];
+    }
+  }
+
+  // Same trick Steam's own store front-end uses for its client-side-authenticated features
+  // (loyalty points, etc.): this endpoint hands back a short-lived access token for whoever's
+  // logged-in session called it, usable as ?access_token=... on api.steampowered.com calls in
+  // place of a server-side API key. Nothing about this is a login credential -- it can't do
+  // anything your browser's own existing session couldn't already do, and it's never sent
+  // anywhere but back to Steam's own API.
+  async function fetchWebApiToken() {
+    const responseText = await gmRequest({
+      method: 'GET',
+      url: ASYNC_CONFIG_URL,
+      headers: { Accept: 'application/json' }
+    });
+    const data = JSON.parse(responseText);
+    return data && data.success && data.data && data.data.webapi_token ? data.data.webapi_token : null;
+  }
+
+  // GetFamilyGroupForUser's steamid param is only for support/admin accounts looking up
+  // someone else's group -- omitted here on purpose, letting it resolve for whoever the
+  // access_token itself identifies (i.e. us). include_family_group_response=true asks for the
+  // group id itself, not just a yes/no membership flag.
+  //
+  // NOTE for whoever reads this later: the exact response field name for the group id was not
+  // verified against a real, live logged-in session before this shipped (no live browser
+  // session was available while writing it) -- family_groupid is the most likely name (matches
+  // every other IFamilyGroupsService param/response using that name), but if this keeps
+  // returning [] for an account you KNOW has an active Family Group, open the Network tab for
+  // this request and check the real response shape first.
+  async function resolveFamilyGroupId(token) {
+    try {
+      const params = new URLSearchParams({ access_token: token, include_family_group_response: 'true' });
+      const responseText = await gmRequest({ method: 'GET', url: `${FAMILY_GROUP_URL}?${params.toString()}` });
+      const data = JSON.parse(responseText);
+      const groupId = data && data.response && data.response.family_groupid;
+      if (groupId) {
+        return String(groupId);
+      }
+    } catch (error) {
+      console.warn('[OneMorePlat Library Scan] GetFamilyGroupForUser failed:', error);
+    }
+
+    // Fallback: family_groupid=0 as a literal value is undocumented but reportedly tolerated
+    // by Steam for the common case of belonging to exactly one Family Group -- worth trying
+    // before giving up entirely, since the proper lookup above needs a working, correctly-
+    // shaped GetFamilyGroupForUser response to succeed at all.
+    return '0';
+  }
+
+  async function fetchSharedLibraryAppIds(token, familyGroupId, mySteamId) {
+    const params = new URLSearchParams({
+      access_token: token,
+      family_groupid: familyGroupId,
+      include_own: 'true',
+      include_excluded: 'true',
+      include_free: 'true',
+      include_non_games: 'true'
+    });
+    const responseText = await gmRequest({
+      method: 'GET',
+      url: `${SHARED_LIBRARY_URL}?${params.toString()}`
+    });
+    const data = JSON.parse(responseText);
+    const apps = data && data.response && Array.isArray(data.response.apps) ? data.response.apps : [];
+
+    const mySteamIdStr = String(mySteamId);
+    const sharedAppIds = [];
+    for (const app of apps) {
+      const owners = Array.isArray(app.owner_steamids) ? app.owner_steamids.map(String) : [];
+      // Only apps we DON'T own a license for ourselves, and that aren't sharing-restricted
+      // (exclude_reason 0 = no restriction) -- matches "someone else shared this with me".
+      if (!owners.includes(mySteamIdStr) && app.exclude_reason === 0) {
+        sharedAppIds.push(app.appid);
+      }
+    }
+    return sharedAppIds;
+  }
+
   // GM_xmlhttpRequest, not fetch: this is a cross-origin POST (store.steampowered.com /
   // steamcommunity.com -> onemoreplat.games). A plain fetch would need CORS headers
   // OneMorePlat's backend doesn't send for arbitrary origins and doesn't need to.
-  function queueLibraryScan(steamId, appIds) {
+  function queueLibraryScan(steamId, appIds, familySharedAppIds) {
     return gmRequest({
       method: 'POST',
       url: `${API_BASE}/sync/library-scan`,
       headers: { 'Content-Type': 'application/json' },
-      data: JSON.stringify({ steamId, appIds })
+      data: JSON.stringify({ steamId, appIds, familySharedAppIds })
     });
   }
 
-  // The script's whole job: read the account's own appId list, normalize it (just "is this
-  // actually an array of appIds"), and hand it off -- no classification, no filtering, no
-  // verification happens here, that's all server-side from here.
+  // The script's whole job: read the account's own appId list plus its Family Group's shared
+  // one, normalize both (just "is this actually an array of appIds"), and hand them off -- no
+  // classification, no filtering, no verification happens here, that's all server-side from
+  // here.
   async function runOnStorePage() {
     if (typeof g_steamID === 'undefined' || !g_steamID) {
       return; // not logged in
     }
     try {
-      const appIds = await fetchOwnedAppIdsSameOrigin();
-      if (appIds.length > 0) {
-        await queueLibraryScan(g_steamID, appIds);
+      const [appIds, familySharedAppIds] = await Promise.all([
+        fetchOwnedAppIdsSameOrigin(),
+        fetchFamilySharedAppIds(g_steamID)
+      ]);
+      if (appIds.length > 0 || familySharedAppIds.length > 0) {
+        await queueLibraryScan(g_steamID, appIds, familySharedAppIds);
       }
     } catch (error) {
       console.warn('[OneMorePlat Library Scan]', error);
@@ -188,14 +318,17 @@
       label.textContent = 'OneMorePlat: leyendo tu biblioteca de Steam…';
 
       try {
-        const appIds = await fetchOwnedAppIdsCrossOrigin();
-        if (appIds.length === 0) {
+        const [appIds, familySharedAppIds] = await Promise.all([
+          fetchOwnedAppIdsCrossOrigin(),
+          fetchFamilySharedAppIds(g_steamID)
+        ]);
+        if (appIds.length === 0 && familySharedAppIds.length === 0) {
           label.textContent = 'OneMorePlat: no se ha podido leer tu biblioteca de Steam (¿sesión iniciada?).';
           return;
         }
 
         label.textContent = `OneMorePlat: enviando ${appIds.length} juego(s)…`;
-        await queueLibraryScan(g_steamID, appIds);
+        await queueLibraryScan(g_steamID, appIds, familySharedAppIds);
 
         // Only written on confirmed success -- never optimistically on click.
         writeLastSentCookie();
