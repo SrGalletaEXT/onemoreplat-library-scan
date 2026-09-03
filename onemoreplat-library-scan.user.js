@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OneMorePlat Library Scan
 // @namespace    https://github.com/SrGalletaEXT/onemoreplat-library-scan
-// @version      8.0.0
+// @version      8.0.1
 // @description  Reports your own Steam library (delisted, family-shared, and never-launched free games GetOwnedGames misses) to OneMorePlat -- reads only your own logged-in browser session, no third-party data.
 // @author       SrGalletaEXT
 // @match        https://store.steampowered.com/*
