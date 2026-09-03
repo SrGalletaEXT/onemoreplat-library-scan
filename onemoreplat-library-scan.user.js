@@ -77,6 +77,15 @@
   const FAMILY_GROUP_URL = 'https://api.steampowered.com/IFamilyGroupsService/GetFamilyGroupForUser/v1/';
   const SHARED_LIBRARY_URL = 'https://api.steampowered.com/IFamilyGroupsService/GetSharedLibraryApps/v1/';
   const LAST_SENT_COOKIE = 'onemoreplat_last_sent';
+  const LOG_PREFIX = '[OneMorePlat Library Scan]';
+
+  // Plain console.log throughout the Family Group chain (new, less-proven than the rest of
+  // this script) -- deliberately verbose so testing this for the first time against a real
+  // account just means "open the console, reload/click, read what happened", instead of
+  // having to decode GM_xmlhttpRequest responses out of the Network tab by hand.
+  function debugLog(...args) {
+    console.log(LOG_PREFIX, ...args);
+  }
 
   function gmRequest(options) {
     return new Promise((resolve, reject) => {
@@ -127,19 +136,27 @@
   // reporting must never be blocked by this newer, less-proven feature.
   async function fetchFamilySharedAppIds(mySteamId) {
     try {
+      debugLog('Family Group check: requesting webapi_token...');
       const token = await fetchWebApiToken();
       if (!token) {
+        debugLog('Family Group check: no webapi_token in the response, stopping here (see the raw response logged above).');
         return [];
       }
+      debugLog('Family Group check: got a webapi_token.');
 
+      // resolveFamilyGroupId always resolves to SOME value (falling back to the literal
+      // '0' -- see its own comment) rather than ever giving up outright: an account with no
+      // Family Group at all should just get an empty apps list back from the call below,
+      // same end result as stopping here early would have given, but tried for real instead
+      // of assumed.
       const familyGroupId = await resolveFamilyGroupId(token);
-      if (!familyGroupId) {
-        return []; // Not in a Family Group at all -- a normal, common case, not an error.
-      }
+      debugLog('Family Group check: using family_groupid =', familyGroupId);
 
-      return await fetchSharedLibraryAppIds(token, familyGroupId, mySteamId);
+      const sharedAppIds = await fetchSharedLibraryAppIds(token, familyGroupId, mySteamId);
+      debugLog('Family Group check: shared-but-not-owned appIds found =', sharedAppIds);
+      return sharedAppIds;
     } catch (error) {
-      console.warn('[OneMorePlat Library Scan] family-sharing check failed, skipping:', error);
+      console.warn(`${LOG_PREFIX} family-sharing check failed, skipping:`, error);
       return [];
     }
   }
@@ -157,6 +174,9 @@
       headers: { Accept: 'application/json' }
     });
     const data = JSON.parse(responseText);
+    if (!data || !data.success || !data.data || !data.data.webapi_token) {
+      debugLog('ajaxgetasyncconfig raw response (no webapi_token found in it):', data);
+    }
     return data && data.success && data.data && data.data.webapi_token ? data.data.webapi_token : null;
   }
 
@@ -176,12 +196,14 @@
       const params = new URLSearchParams({ access_token: token, include_family_group_response: 'true' });
       const responseText = await gmRequest({ method: 'GET', url: `${FAMILY_GROUP_URL}?${params.toString()}` });
       const data = JSON.parse(responseText);
+      debugLog('GetFamilyGroupForUser raw response:', data);
       const groupId = data && data.response && data.response.family_groupid;
       if (groupId) {
         return String(groupId);
       }
+      debugLog('GetFamilyGroupForUser: no family_groupid in the response above -- falling back to family_groupid=0.');
     } catch (error) {
-      console.warn('[OneMorePlat Library Scan] GetFamilyGroupForUser failed:', error);
+      console.warn(`${LOG_PREFIX} GetFamilyGroupForUser failed:`, error);
     }
 
     // Fallback: family_groupid=0 as a literal value is undocumented but reportedly tolerated
@@ -205,6 +227,7 @@
       url: `${SHARED_LIBRARY_URL}?${params.toString()}`
     });
     const data = JSON.parse(responseText);
+    debugLog('GetSharedLibraryApps raw response:', data);
     const apps = data && data.response && Array.isArray(data.response.apps) ? data.response.apps : [];
 
     const mySteamIdStr = String(mySteamId);
@@ -224,6 +247,10 @@
   // steamcommunity.com -> onemoreplat.games). A plain fetch would need CORS headers
   // OneMorePlat's backend doesn't send for arbitrary origins and doesn't need to.
   function queueLibraryScan(steamId, appIds, familySharedAppIds) {
+    debugLog(
+      `sending ${appIds.length} owned appId(s) and ${familySharedAppIds.length} family-shared appId(s) to OneMorePlat:`,
+      { appIds, familySharedAppIds }
+    );
     return gmRequest({
       method: 'POST',
       url: `${API_BASE}/sync/library-scan`,
