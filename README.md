@@ -22,6 +22,20 @@ The script's own job stops at reading these appId lists and normalizing them int
 2. Install the script: [onemoreplat-library-scan.user.js](https://raw.githubusercontent.com/SrGalletaEXT/onemoreplat-library-scan/main/onemoreplat-library-scan.user.js) (Tampermonkey will open its install prompt automatically).
 3. Visit any Steam store page -- that's it, no further setup. Your Steam ID alone identifies your OneMorePlat account, the same way it already does for any of Steam's own APIs.
 
+## Rare cases: manual cross-checking
+
+The automatic checks above (`dynamicstore/userdata` + your *current* Family Group) cover almost everything, but not quite all of it. A game that was family-shared with you in the past and isn't anymore is the known example: the achievement progress is real and permanently yours, but a *current* Family Group check has no way to see a share that no longer exists.
+
+For these rare, one-off cases there's a separate comparison script that cross-checks your progress against other public Steam achievement trackers and flags any appId gaps. It's intentionally **not** part of this repo, not installed automatically, and never runs on its own -- it only gets handed out directly, by hand, on the rare occasion a specific case actually needs it.
+
+If you're given that script:
+
+1. Install it in Tampermonkey the same way as this one, and run it on your own Steam Community profile -- let it finish comparing before reading the results.
+2. Copy the appId(s) it flags as missing from OneMorePlat (comma-separated).
+3. Paste them into the **"Añadir por ID"** box below the "Buscar juegos" button on your OneMorePlat profile panel (that panel comes from *this* script). They go through the exact same verification and sync as anything found automatically -- just entered by hand instead of discovered on their own.
+
+This is a last resort, not a replacement for anything above -- most accounts never need it.
+
 ## Data sent
 
 Your Steam ID (to identify your OneMorePlat account), the plain list of appIds `dynamicstore/userdata` reports as owned, and the plain list of appIds your Steam Family Group shares with you that you don't already own outright. No wishlist, no friends list, no play history, no other account's data ever leaves your browser.
