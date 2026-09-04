@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OneMorePlat Library Scan
 // @namespace    https://github.com/SrGalletaEXT/onemoreplat-library-scan
-// @version      8.1.1
+// @version      8.1.2
 // @description  Reports your own Steam library (delisted, family-shared, and never-launched free games GetOwnedGames misses) to OneMorePlat -- reads only your own logged-in browser session, no third-party data.
 // @author       SrGalletaEXT
 // @match        https://store.steampowered.com/*
@@ -332,11 +332,29 @@
       return;
     }
 
-    const panel = document.createElement('div');
+    // The whole card is a <details> -- collapsed by default, so it's just one line on the
+    // profile page until someone actually wants to use it, instead of a permanently-open box
+    // pushing everything below it down on every single visit.
+    const panel = document.createElement('details');
     panel.id = 'onemoreplat-library-scan-panel';
     panel.style.cssText =
       'background:#1b2838;color:#c7d5e0;padding:10px 14px;margin:10px 0;' +
       'border-radius:4px;font-size:13px;line-height:1.4;border:1px solid #2a475e;';
+
+    // Read once at build time, same as renderIdleLabel below -- just enough so collapsing the
+    // card doesn't hide whether it's actually been used before, without wiring up its own
+    // separate update logic (renderIdleLabel already re-renders the row inside once expanded).
+    const summaryLastSent = readLastSentCookie();
+    const panelSummary = document.createElement('summary');
+    panelSummary.textContent = summaryLastSent
+      ? `OneMorePlat Library Scan (último envío ${new Date(summaryLastSent).toLocaleDateString()})`
+      : 'OneMorePlat Library Scan';
+    panelSummary.style.cssText = 'cursor:pointer;font-weight:600;color:#66c0f4;';
+    panel.appendChild(panelSummary);
+
+    const panelBody = document.createElement('div');
+    panelBody.style.cssText = 'margin-top:10px;';
+    panel.appendChild(panelBody);
 
     const scanRow = document.createElement('div');
     scanRow.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:12px;';
@@ -388,7 +406,7 @@
     renderIdleLabel();
     scanRow.appendChild(label);
     scanRow.appendChild(button);
-    panel.appendChild(scanRow);
+    panelBody.appendChild(scanRow);
 
     // --- Manual, last-resort appId entry (v8.1) ---------------------------------------------
     // Collapsed by default via a plain <details> -- this is a rare-case option, not something
@@ -487,7 +505,7 @@
     manualBody.appendChild(manualHint);
     manualBody.appendChild(manualRow);
     manualBody.appendChild(manualStatus);
-    panel.appendChild(manualDetails);
+    panelBody.appendChild(manualDetails);
 
     const anchor = document.querySelector('.profile_header') || document.querySelector('.profile_page') || document.body;
     anchor.insertBefore(panel, anchor.firstChild);
