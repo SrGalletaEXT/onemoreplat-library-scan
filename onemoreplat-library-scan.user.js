@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OneMorePlat Library Scan
 // @namespace    https://github.com/SrGalletaEXT/onemoreplat-library-scan
-// @version      8.0.1
+// @version      8.1.0
 // @description  Reports your own Steam library (delisted, family-shared, and never-launched free games GetOwnedGames misses) to OneMorePlat -- reads only your own logged-in browser session, no third-party data.
 // @author       SrGalletaEXT
 // @match        https://store.steampowered.com/*
@@ -63,6 +63,13 @@
  *    fails for any reason (no Family Group, Steam changed the endpoint, anything) it's caught
  *    and logged to the console, never blocking the rest of the report -- rgOwnedApps still
  *    gets sent either way.
+ *  - Below that button, a second row (v8.1) is a manual, last-resort appId box: paste a
+ *    comma-separated list of Steam appIds you've found some other way (e.g. by hand-comparing
+ *    against another tracker) and they're queued the exact same way as everything else this
+ *    script sends -- same endpoint, same job pipeline, same server-side GetPlayerAchievements
+ *    verification before anything is added. This box makes NO calls anywhere except
+ *    OneMorePlat's own API; it never talks to any other tracker's site, and it's entirely
+ *    separate from any other comparison tool you might run by hand elsewhere.
  *
  * No setup needed beyond installing this -- your Steam ID alone identifies your OneMorePlat
  * account, same as it already does for any of Steam's own APIs.
@@ -246,16 +253,23 @@
   // GM_xmlhttpRequest, not fetch: this is a cross-origin POST (store.steampowered.com /
   // steamcommunity.com -> onemoreplat.games). A plain fetch would need CORS headers
   // OneMorePlat's backend doesn't send for arbitrary origins and doesn't need to.
-  function queueLibraryScan(steamId, appIds, familySharedAppIds) {
+  //
+  // manualAppIds (v8.1): appIds the user typed in by hand into the profile-page box below,
+  // instead of ones this script discovered on its own. Sent through this exact same call --
+  // same endpoint, same steamId identification -- so the backend can route them through the
+  // normal job pipeline (GetPlayerAchievements verification, then a real recalculation of the
+  // account's stats) rather than being some separate one-off path.
+  function queueLibraryScan(steamId, appIds, familySharedAppIds, manualAppIds) {
     debugLog(
-      `sending ${appIds.length} owned appId(s) and ${familySharedAppIds.length} family-shared appId(s) to OneMorePlat:`,
-      { appIds, familySharedAppIds }
+      `sending ${appIds.length} owned appId(s), ${familySharedAppIds.length} family-shared appId(s), ` +
+        `and ${manualAppIds.length} manually-entered appId(s) to OneMorePlat:`,
+      { appIds, familySharedAppIds, manualAppIds }
     );
     return gmRequest({
       method: 'POST',
       url: `${API_BASE}/sync/library-scan`,
       headers: { 'Content-Type': 'application/json' },
-      data: JSON.stringify({ steamId, appIds, familySharedAppIds })
+      data: JSON.stringify({ steamId, appIds, familySharedAppIds, manualAppIds })
     });
   }
 
@@ -273,7 +287,7 @@
         fetchFamilySharedAppIds(g_steamID)
       ]);
       if (appIds.length > 0 || familySharedAppIds.length > 0) {
-        await queueLibraryScan(g_steamID, appIds, familySharedAppIds);
+        await queueLibraryScan(g_steamID, appIds, familySharedAppIds, []);
       }
     } catch (error) {
       console.warn('[OneMorePlat Library Scan]', error);
@@ -322,8 +336,10 @@
     panel.id = 'onemoreplat-library-scan-panel';
     panel.style.cssText =
       'background:#1b2838;color:#c7d5e0;padding:10px 14px;margin:10px 0;' +
-      'border-radius:4px;font-size:13px;line-height:1.4;border:1px solid #2a475e;' +
-      'display:flex;align-items:center;justify-content:space-between;gap:12px;';
+      'border-radius:4px;font-size:13px;line-height:1.4;border:1px solid #2a475e;';
+
+    const scanRow = document.createElement('div');
+    scanRow.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:12px;';
 
     const label = document.createElement('span');
     const button = document.createElement('button');
@@ -355,7 +371,7 @@
         }
 
         label.textContent = `OneMorePlat: enviando ${appIds.length} juego(s)…`;
-        await queueLibraryScan(g_steamID, appIds, familySharedAppIds);
+        await queueLibraryScan(g_steamID, appIds, familySharedAppIds, []);
 
         // Only written on confirmed success -- never optimistically on click.
         writeLastSentCookie();
@@ -370,8 +386,99 @@
     });
 
     renderIdleLabel();
-    panel.appendChild(label);
-    panel.appendChild(button);
+    scanRow.appendChild(label);
+    scanRow.appendChild(button);
+    panel.appendChild(scanRow);
+
+    // --- Manual, last-resort appId entry (v8.1) ---------------------------------------------
+    // A thin divider separates this from the automatic scan above; this row does nothing on
+    // its own -- it's only here for appIds you found some other way (by hand, comparing
+    // against another tracker, etc.) that the automatic scan above wouldn't have surfaced.
+    // Submitting goes through the exact same queueLibraryScan call as everything else in this
+    // script -- same endpoint, same job pipeline, same server-side achievement verification --
+    // it never talks to any other site.
+    const divider = document.createElement('hr');
+    divider.style.cssText = 'border:none;border-top:1px solid #2a475e;margin:10px 0;';
+
+    const manualHint = document.createElement('div');
+    manualHint.style.cssText = 'font-size:12px;color:#8f98a0;margin-bottom:6px;';
+    manualHint.textContent =
+      'Último recurso: si conoces algún appId de Steam que el escaneo automático no haya encontrado, ' +
+      'añádelo aquí a mano (separado por comas).';
+
+    const manualRow = document.createElement('div');
+    manualRow.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
+
+    const manualInput = document.createElement('input');
+    manualInput.type = 'text';
+    manualInput.placeholder = 'p. ej. 252850,261820,427270';
+    manualInput.style.cssText =
+      'flex:1 1 240px;background:#0f1720;color:#c7d5e0;border:1px solid #2a475e;' +
+      'border-radius:3px;padding:5px 8px;font-size:12px;';
+
+    const manualButton = document.createElement('button');
+    manualButton.textContent = 'Añadir por ID';
+    manualButton.style.cssText =
+      'background:#2a475e;color:#c7d5e0;border:1px solid #66c0f4;border-radius:3px;' +
+      'padding:5px 12px;font-size:12px;cursor:pointer;flex:0 0 auto;';
+
+    const manualStatus = document.createElement('div');
+    manualStatus.style.cssText = 'flex:1 1 100%;font-size:12px;color:#c7d5e0;min-height:16px;margin-top:4px;';
+
+    // Same parsing style as the appIds pasted into chat during testing: comma-separated,
+    // whitespace tolerated, non-numeric/duplicate/non-positive entries dropped rather than
+    // rejecting the whole submission -- the backend re-validates/dedupes independently anyway
+    // (see processLibraryScan's candidateManualAppIds handling), this is just so obviously bad
+    // input doesn't even leave the browser.
+    function parseManualAppIds(rawText) {
+      const seen = new Set();
+      for (const piece of rawText.split(',')) {
+        const trimmed = piece.trim();
+        if (!trimmed) continue;
+        const id = Number(trimmed);
+        if (Number.isInteger(id) && id > 0) {
+          seen.add(id);
+        }
+      }
+      return Array.from(seen);
+    }
+
+    manualButton.addEventListener('click', async () => {
+      const manualAppIds = parseManualAppIds(manualInput.value);
+      if (manualAppIds.length === 0) {
+        manualStatus.textContent = 'Escribe al menos un appId numérico válido, separado por comas.';
+        return;
+      }
+
+      manualButton.disabled = true;
+      manualButton.textContent = 'Añadiendo…';
+      manualStatus.textContent = `OneMorePlat: enviando ${manualAppIds.length} appId(s)…`;
+
+      try {
+        // No automatic discovery here -- appIds/familySharedAppIds are empty on purpose, this
+        // submission is ONLY the manual list. A normal sync still runs on the backend for
+        // these (GetPlayerAchievements verification, then recalculateUserCompetitiveStats),
+        // same as any other discovery path -- see processAchievementVerifiedAppIds.
+        await queueLibraryScan(g_steamID, [], [], manualAppIds);
+        manualStatus.textContent =
+          `OneMorePlat: ${manualAppIds.length} appId(s) enviado(s). Se comprobarán y se añadirán ` +
+          'los que de verdad tengan progreso de logros.';
+        manualInput.value = '';
+      } catch (error) {
+        console.warn('[OneMorePlat Library Scan]', error);
+        manualStatus.textContent = `OneMorePlat: el envío ha fallado (${error.message}) -- inténtalo de nuevo.`;
+      } finally {
+        manualButton.disabled = false;
+        manualButton.textContent = 'Añadir por ID';
+      }
+    });
+
+    manualRow.appendChild(manualInput);
+    manualRow.appendChild(manualButton);
+    panel.appendChild(divider);
+    panel.appendChild(manualHint);
+    panel.appendChild(manualRow);
+    panel.appendChild(manualStatus);
 
     const anchor = document.querySelector('.profile_header') || document.querySelector('.profile_page') || document.body;
     anchor.insertBefore(panel, anchor.firstChild);
