@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OneMorePlat Library Scan
 // @namespace    https://github.com/SrGalletaEXT/onemoreplat-library-scan
-// @version      8.1.0
+// @version      8.1.1
 // @description  Reports your own Steam library (delisted, family-shared, and never-launched free games GetOwnedGames misses) to OneMorePlat -- reads only your own logged-in browser session, no third-party data.
 // @author       SrGalletaEXT
 // @match        https://store.steampowered.com/*
@@ -391,14 +391,23 @@
     panel.appendChild(scanRow);
 
     // --- Manual, last-resort appId entry (v8.1) ---------------------------------------------
-    // A thin divider separates this from the automatic scan above; this row does nothing on
-    // its own -- it's only here for appIds you found some other way (by hand, comparing
-    // against another tracker, etc.) that the automatic scan above wouldn't have surfaced.
+    // Collapsed by default via a plain <details> -- this is a rare-case option, not something
+    // that needs to sit open and take up space every time someone loads their profile. Its own
+    // border-top doubles as the thin divider from the automatic scan above, open or not.
     // Submitting goes through the exact same queueLibraryScan call as everything else in this
     // script -- same endpoint, same job pipeline, same server-side achievement verification --
     // it never talks to any other site.
-    const divider = document.createElement('hr');
-    divider.style.cssText = 'border:none;border-top:1px solid #2a475e;margin:10px 0;';
+    const manualDetails = document.createElement('details');
+    manualDetails.style.cssText = 'margin-top:10px;padding-top:8px;border-top:1px solid #2a475e;';
+
+    const manualSummary = document.createElement('summary');
+    manualSummary.textContent = 'Añadir appId manualmente (último recurso)';
+    manualSummary.style.cssText = 'cursor:pointer;color:#8f98a0;font-size:12px;font-weight:600;';
+    manualDetails.appendChild(manualSummary);
+
+    const manualBody = document.createElement('div');
+    manualBody.style.cssText = 'margin-top:8px;';
+    manualDetails.appendChild(manualBody);
 
     const manualHint = document.createElement('div');
     manualHint.style.cssText = 'font-size:12px;color:#8f98a0;margin-bottom:6px;';
@@ -475,10 +484,10 @@
 
     manualRow.appendChild(manualInput);
     manualRow.appendChild(manualButton);
-    panel.appendChild(divider);
-    panel.appendChild(manualHint);
-    panel.appendChild(manualRow);
-    panel.appendChild(manualStatus);
+    manualBody.appendChild(manualHint);
+    manualBody.appendChild(manualRow);
+    manualBody.appendChild(manualStatus);
+    panel.appendChild(manualDetails);
 
     const anchor = document.querySelector('.profile_header') || document.querySelector('.profile_page') || document.body;
     anchor.insertBefore(panel, anchor.firstChild);
